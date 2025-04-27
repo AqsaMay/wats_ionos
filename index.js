@@ -1,21 +1,63 @@
 const express = require('express');
-const { initializeSocket, getSocket } = require('./send');
+const { initializeSocket, getSocket } = require('./send'); // Your existing socket handler
 
 const app = express();
-//const PORT = 8080;
 const PORT = process.env.PORT || 8080;
 
-// Initialize sockets for multiple phone numbers
-const phoneNumbers = ['972523932747', '972522902774', '972505526600','972555544630']; // Add more numbers as needed
+// Initialize sockets for these numbers
+const phoneNumbers = ['972523932747', '972522902774', '972505526600','972555544630'];
 let socketPromises = phoneNumbers.map(num => initializeSocket(num));
 
 Promise.all(socketPromises).then(() => {
   console.log("All sockets initialized");
 });
 
-// Serve the QR code for scanning
+// Health check endpoint with PROPER connection status
+app.get('/send', (req, res) => {
+  const serverStatus = {
+    status: 'active',
+    port: PORT,
+    connectedNumbers: phoneNumbers.map(num => {
+      const socketData = getSocket(num);
+      return {
+        number: num,
+        status: socketData?.sock?.user ? 'connected' : 'pending'
+      };
+    }),
+    timestamp: new Date().toLocaleString('ar-SA', { timeZone: 'Asia/Riyadh' })
+  };
+
+  res.status(200).json(serverStatus);
+});
+
+// QR endpoint with number validation
 app.get('/qr/:phoneNumber', (req, res) => {
   const { phoneNumber } = req.params;
+
+  if (!phoneNumbers.includes(phoneNumber)) {
+    return res.status(404).send(`
+      <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <style>
+            body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; 
+                   background-color: #f0f0f0; font-family: Arial, sans-serif; direction: rtl; }
+            .container { text-align: center; padding: 20px; border-radius: 10px; 
+                        background-color: white; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); 
+                        width: 80%; max-width: 400px; }
+            .error { color: red; font-size: 24px; margin-top: 20px; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>خطأ</h1>
+            <p class="error">رقم الهاتف ${phoneNumber} غير مسجل في النظام</p>
+            <p>الرجاء التحقق من الرقم المدخل</p>
+          </div>
+        </body>
+      </html>
+    `);
+  }
 
   const socketData = getSocket(phoneNumber);
 
@@ -25,38 +67,14 @@ app.get('/qr/:phoneNumber', (req, res) => {
         <head>
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <style>
-            body {
-              display: flex;
-              justify-content: center;
-              align-items: center;
-              height: 100vh;
-              margin: 0;
-              background-color: #f0f0f0;
-              font-family: Arial, sans-serif;
-              direction: rtl;
-            }
-            .container {
-              text-align: center;
-              padding: 20px;
-              border-radius: 10px;
-              background-color: white;
-              box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-              width: 80%;
-              max-width: 400px;
-            }
-            .status {
-              font-size: 24px;
-              margin-top: 20px;
-              color: #333;
-            }
-            .status.connected {
-              color: green;
-            }
-            .tick {
-              font-size: 50px;
-              color: green;
-              margin-top: 20px;
-            }
+            body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; 
+                   background-color: #f0f0f0; font-family: Arial, sans-serif; direction: rtl; }
+            .container { text-align: center; padding: 20px; border-radius: 10px; 
+                        background-color: white; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); 
+                        width: 80%; max-width: 400px; }
+            .status { font-size: 24px; margin-top: 20px; color: #333; }
+            .status.connected { color: green; }
+            .tick { font-size: 50px; color: green; margin-top: 20px; }
           </style>
         </head>
         <body>
@@ -76,8 +94,11 @@ app.get('/qr/:phoneNumber', (req, res) => {
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-          body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f0f0; font-family: Arial, sans-serif; direction: rtl; }
-          .container { text-align: center; padding: 20px; border-radius: 10px; background-color: white; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); width: 80%; max-width: 400px; }
+          body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; 
+                 background-color: #f0f0f0; font-family: Arial, sans-serif; direction: rtl; }
+          .container { text-align: center; padding: 20px; border-radius: 10px; 
+                      background-color: white; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); 
+                      width: 80%; max-width: 400px; }
           img { border: 2px solid #333; border-radius: 10px; }
           .status { font-size: 24px; margin-top: 20px; color: #333; }
         </style>
@@ -89,14 +110,14 @@ app.get('/qr/:phoneNumber', (req, res) => {
           <p class="status">يرجى مسح رمز QR للاتصال بـ WhatsApp.</p>
         </div>
         <script>
-          setTimeout(function() { window.location.reload(); }, 5000);
+          setTimeout(function() { window.location.reload(); }, 10000);
         </script>
       </body>
     </html>
   `);
 });
 
-// Endpoint to send a message using query parameters
+// Message sending endpoint
 app.get('/send-message', async (req, res) => {
   const { number, message, senderNumber } = req.query;
 
@@ -109,15 +130,15 @@ app.get('/send-message', async (req, res) => {
 
   const socketData = getSocket(senderNumber);
 
-  if (!socketData || !socketData.sock || !socketData.sock.sendMessage) {
+  if (!socketData?.sock?.user) {
     return res.status(500).json({
       status: 'error',
-      message: `منفذ WhatsApp لـ ${senderNumber} غير جاهز. يرجى مسح رمز QR أولاً.`,
+      message: `منفذ WhatsApp لـ ${senderNumber} غير متصل. يرجى مسح رمز QR أولاً.`,
     });
   }
 
   try {
-    const jid = `${number}@s.whatsapp.net`; // Format the number for WhatsApp
+    const jid = `${number}@s.whatsapp.net`;
     await socketData.sock.sendMessage(jid, { text: message });
 
     res.json({
