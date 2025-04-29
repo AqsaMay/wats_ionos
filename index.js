@@ -1,6 +1,8 @@
 const express = require('express');
-const { initializeSocket, getSocket } = require('./send'); // Your existing socket handler
+//const { initializeSocket, getSocket } = require('./send'); // Your existing socket handler
+const { initializeSocket, getSocket, exportedNumbers } = require('./send');
 
+const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
@@ -153,6 +155,128 @@ app.get('/send-message', async (req, res) => {
     });
   }
 });
+
+//================================
+// Group creation endpoint
+// POST /group/:subject - create WhatsApp group
+// GET /group/:subject - create group using fixed sender and participants
+app.get('/group/:subject', async (req, res) => {
+  const { subject } = req.params;
+
+  // Fixed sender number (must be in the phoneNumbers list and authenticated)
+  const senderNumber = '972555544630';
+
+  // Fixed list of participants
+ const participants = [
+    '972505526600',
+    //'972522902774',
+    '972523932747'
+  ];
+  
+
+  if (!subject) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'اسم المجموعة مفقود في الرابط.',
+    });
+  }
+
+  const socketData = getSocket(senderNumber);
+  if (!socketData?.sock?.user) {
+    return res.status(500).json({
+      status: 'error',
+      message: `رقم المرسل غير متصل: ${senderNumber}`,
+    });
+  }
+
+  try {
+    const participantJIDs = participants.map(p => `${p}@s.whatsapp.net`);
+    const group = await socketData.sock.groupCreate(subject, participantJIDs);
+
+    res.json({
+      status: 'success',
+      groupId: group.gid,
+      subject,
+      participants: participants.length,
+      message: `✅ تم إنشاء المجموعة "${subject}" بنجاح.`,
+    });
+  } catch (err) {
+    console.error('خطأ في إنشاء المجموعة:', err);
+    res.status(500).json({
+      status: 'error',
+      message: 'حدث خطأ أثناء إنشاء المجموعة.',
+    });
+  }
+});
+
+// then in url http://localhost:8080/group/DELETE_IT66
+//======================================
+
+
+
+// Export chat numbers as a text file
+app.get('/export-chats/:senderNumber', (req, res) => {
+  const { senderNumber } = req.params;
+  const socketData = getSocket(senderNumber);
+
+  if (!socketData?.sock?.user) {
+    return res.status(500).json({
+      status: 'error',
+      message: `الرقم ${senderNumber} غير متصل.`,
+    });
+  }
+
+  const numbersSet = exportedNumbers.get(senderNumber);
+
+  if (!numbersSet || numbersSet.size === 0) {
+    return res.status(200).json({
+      status: 'success',
+      count: 0,
+      numbers: [],
+    });
+  }
+
+  const numbers = [...numbersSet];
+
+  res.status(200).json({
+    status: 'success',
+    count: numbers.length,
+    numbers,
+  });
+});
+
+
+//++++++++++++++++++++++++++++++++++++++++++++
+
+app.get('/export-text/:senderNumber', (req, res) => {
+  const { senderNumber } = req.params;
+  const numbersSet = exportedNumbers.get(senderNumber);
+
+  if (!numbersSet || numbersSet.size === 0) {
+    return res.status(404).json({
+      status: 'error',
+      message: 'لم يتم العثور على أرقام لهذا الرقم.',
+    });
+  }
+
+  const numbers = Array.from(numbersSet);
+  const filename = `contacts_${senderNumber}.csv`;
+  const csvContent = `Number\n` + numbers.join('\n'); // CSV header + numbers
+
+  fs.writeFileSync(filename, csvContent, 'utf-8');
+
+  res.download(filename, (err) => {
+    if (err) {
+      console.error('Download error:', err);
+      res.status(500).send('فشل تحميل الملف.');
+    } else {
+      fs.unlinkSync(filename); // Delete after sending
+    }
+  });
+});
+
+//==========================
+
 
 app.listen(PORT, () => {
   console.log(`الخادم يعمل على http://localhost:${PORT}`);

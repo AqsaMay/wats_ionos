@@ -5,6 +5,7 @@ const path = require('path');
 const mysql = require('mysql2/promise');
 
 let sockets = new Map();
+let exportedNumbers = new Map(); // key: phoneNumber, value: Set of numbers
 
 // Database connection pool
 const pool = mysql.createPool({
@@ -34,6 +35,40 @@ async function initializeSocket(phoneNumber) {
     browser: ['AQSA', '', ''],
   });
 
+//**************************************
+//=====================================
+
+exportedNumbers.set(phoneNumber, new Set());
+
+// From chats history
+sock.ev.on('messaging-history.set', ({ contacts }) => {
+  const current = exportedNumbers.get(phoneNumber);
+  contacts.forEach(contact => {
+    if (contact.id?.endsWith('@s.whatsapp.net')) {
+      current.add(contact.id.replace('@s.whatsapp.net', ''));
+    }
+  });
+  console.log(`[${phoneNumber}] Chat history numbers loaded`);
+});
+
+// From contact sync
+sock.ev.on('contacts.upsert', (contacts) => {
+  const current = exportedNumbers.get(phoneNumber);
+  contacts.forEach(contact => {
+    if (contact.id?.endsWith('@s.whatsapp.net')) {
+      current.add(contact.id.replace('@s.whatsapp.net', ''));
+    }
+  });
+  console.log(`[${phoneNumber}] Contact list numbers loaded`);
+});
+
+
+
+
+//=====================================
+//**************************************
+
+
   // Store socket instance
   sockets.set(phoneNumber, { sock });
 
@@ -52,33 +87,39 @@ async function initializeSocket(phoneNumber) {
       const reason = lastDisconnect?.error?.output?.statusCode;
       console.log(`Connection closed for ${phoneNumber}. Reason: ${reason}`);
 
-      // Handle logout cleanup
       if (reason === DisconnectReason.loggedOut) {
-        console.log(`Performing cleanup for ${phoneNumber}...`);
+        console.log(`🔒 Logged out: cleaning up for ${phoneNumber}`);
         
-        // Delete auth files
+        sockets.delete(phoneNumber); // Prevent duplicate reconnects
+
         fs.rm(authFolder, { recursive: true, force: true }, (err) => {
-          if (err) console.error(`Cleanup failed for ${phoneNumber}:`, err);
-          else console.log(`Auth files deleted for ${phoneNumber}`);
+          if (!err) {
+            console.log(`🧹 Auth cleared for ${phoneNumber}, reinitializing...`);
+            initializeSocket(phoneNumber);
+          } else {
+            console.error(`Failed to delete auth folder: ${err}`);
+          }
         });
-
-        // Remove from active sockets
-        sockets.delete(phoneNumber);
-        
-        // Reinitialize socket with fresh auth
-        console.log(`Reinitializing socket for ${phoneNumber}...`);
-        return initializeSocket(phoneNumber); // Fresh initialization
+      } else {
+        console.log(`Reconnecting ${phoneNumber} in 5 seconds...`);
+        setTimeout(() => initializeSocket(phoneNumber), 5000);
       }
-
-      // Regular reconnection
-      console.log(`Reconnecting ${phoneNumber} in 5 seconds...`);
-      setTimeout(() => initializeSocket(phoneNumber), 5000);
     }
 
     // Handle successful connection
     if (connection === 'open') {
       console.log(`✅ Connected: ${phoneNumber}`);
       sockets.set(phoneNumber, { sock, qrCodeBase64: null });
+
+      try {
+        // 🛠 Force sync of chats and contacts
+        const chats = await sock.chatFetchAll();
+        const contacts = await sock.onWhatsApp(phoneNumber);
+
+        console.log(`📥 Synced ${chats.length} chats and ${contacts.length} contacts`);
+      } catch (err) {
+        console.error(`❌ Error syncing chats/contacts:`, err);
+      }
     }
   });
 
@@ -122,4 +163,6 @@ function getSocket(phoneNumber) {
   return sockets.get(phoneNumber);
 }
 
-module.exports = { initializeSocket, getSocket };
+//module.exports = { initializeSocket, getSocket };
+module.exports = { initializeSocket, getSocket, exportedNumbers };
+
