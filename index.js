@@ -1,13 +1,17 @@
 const express = require('express');
 //const { initializeSocket, getSocket } = require('./send'); // Your existing socket handler
-const { initializeSocket, getSocket, exportedNumbers } = require('./send');
+//const { initializeSocket, getSocket, exportedNumbers } = require('./send');
+//const { initializeSocket, getSocket, exportedNumbers } = require('./send-save-chat');
+const { initializeSocket, getSocket, exportedNumbers } = require('./send-save-chatmulti');
+//const { initializeSocket, getSocket, exportedNumbers } = require('./sendbot');
 
 const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 8080;
+//const PORT = 80;
 
 // Initialize sockets for these numbers
-const phoneNumbers = ['972523932747', '972522902774', '972505526600','972555544630'];
+const phoneNumbers = ['972523932747','972555544630','972528940059'];
 let socketPromises = phoneNumbers.map(num => initializeSocket(num));
 
 Promise.all(socketPromises).then(() => {
@@ -142,7 +146,10 @@ app.get('/send-message', async (req, res) => {
   try {
     const jid = `${number}@s.whatsapp.net`;
     await socketData.sock.sendMessage(jid, { text: message });
+	
 
+
+	
     res.json({
       status: 'success',
       message: `تم إرسال الرسالة إلى ${number} من ${senderNumber}`,

@@ -1,168 +1,264 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason
+} = require('@whiskeysockets/baileys');
+
 const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
-const mysql = require('mysql2/promise');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { DateTime } = require('luxon');
+const { GoogleSpreadsheet } = require('google-spreadsheet');
+const { JWT } = require('google-auth-library');
 
-let sockets = new Map();
-let exportedNumbers = new Map(); // key: phoneNumber, value: Set of numbers
+const SHEET_ID = '1AtprGLuyIgbobCD-F8VqWNk_tBGrlFyrT9Mvakie86c';
+const SERVICE_ACCOUNT_JSON = require('./phpmail-397616-c9480524c6e2.json');
 
-// Database connection pool
-const pool = mysql.createPool({
-  host: 'localhost',
-  user: 'root',
-  password: '',
-  database: 'mix',
-  waitForConnections: true,
-  connectionLimit: 10
-});
+const sockets = new Map();
+const exportedNumbers = new Map();
+
+const GEMINI_API_KEY = 'AIzaSyA1XEZvBMeGmCSEyGiRw2STH13aWi7Cek0';
+
+const SYSTEM_PROMPT = `
+انت مساعد افتراضي لمطبعة ميكس في صور باهر بمنطقة واد الحمص في بناية معصرة الزيتون الطابق الثاني.
+المطبعة متخصصة في طباعة كل شيء.
+عروضات حالية على شوادر الحجاج.
+عروض على الطباعة على الملابس ومن ضمنها البلايز بالاعداد 100 بسعر 30 شيكل على البلوزة سعر الجملة وسعر الواحدة 50 شيكل مفرد.
+في حال كان سؤالك لا تتوفر اجابته لا تقم باختراع اي جواب من عندك ولا تذكر تفاصيل كبيرة.
+وبعدها اخبر العميل ان يتصل في محمد شقيرات.
+دورك هو الرد دائماً باللغة العربية فقط، وبطريقة مهذبة ومختصرة.
+لا تستخدم أي كلمات أو عبارات من لغات أخرى، ولا تذكر كلمات غير عربية مثل "burada" أو غيرها.
+لا تذكر كلمات غير عربية بشكل جزئي مثل بدل ان تقول اخدمك تقول أserve، لا تستخدم حروف غير عربية مطلقا.
+ولا تتكلم اللغة العربية الفصحى بل تكلم اللهجة العامية بدل منها.
+إذا لم تفهم السؤال، أخبر المستخدم بأدب أنك لا تستطيع الإجابة.
+`;
+
+const WORKING_DAYS = [0, 1, 2, 3, 4, 6];
+
+function isWithinWorkingHours() {
+  const now = DateTime.now().setZone('Asia/Jerusalem');
+  const hour = now.hour;
+  const day = now.weekday % 7;
+  return WORKING_DAYS.includes(day) && hour >= 10 && hour < 23;
+}
+
+const messageStatusMap = new Map();
+
+function getJerusalemDateStr() {
+  return DateTime.now().setZone('Asia/Jerusalem').toFormat('yyyy-LL-dd');
+}
+
+function extractPhone(jid) {
+  return jid.split('@')[0];
+}
+
+
+async function recordExists(telephone, dateStr) {
+  try {
+    const creds = require('./phpmail-397616-c9480524c6e2.json');
+    const serviceAccountAuth = new JWT({
+      email: creds.client_email,
+      key: creds.private_key,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    const doc = new GoogleSpreadsheet(SHEET_ID, serviceAccountAuth);
+    await doc.loadInfo();
+    const sheet = doc.sheetsByIndex[0];
+
+    await sheet.loadHeaderRow();
+    console.log('Sheet headers:', sheet.headerValues);
+
+    const rows = await sheet.getRows();
+
+    for (const row of rows) {
+      // Prefer named fields if defined, fallback to rawData
+      const rowTelephone =
+        (row.telephone || row._rawData[sheet.headerValues.indexOf('telephone')] || '').trim();
+      const rowDate =
+        (row.date || row._rawData[sheet.headerValues.indexOf('date')] || '').trim();
+
+      console.log('Checking row:', { rowTelephone, rowDate });
+
+      if (rowTelephone === telephone.trim() && rowDate === dateStr.trim()) {
+        console.log(`Match found: ${telephone} on ${dateStr}`);
+        return true;
+      }
+    }
+
+    console.log(`No match found for ${telephone} on ${dateStr}`);
+    return false;
+  } catch (err) {
+    console.error('Failed to check for existing record:', err.message);
+    return false; // Allow insert if error occurs
+  }
+}
+
+
+
+
+async function appendToSheet({ id, telephone, send, receive, time, date }) {
+  try {
+    const creds = SERVICE_ACCOUNT_JSON;
+    const serviceAccountAuth = new JWT({
+      email: creds.client_email,
+      key: creds.private_key,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    const doc = new GoogleSpreadsheet(SHEET_ID, serviceAccountAuth);
+    await doc.loadInfo();
+    const sheet = doc.sheetsByIndex[0];
+
+    await sheet.addRow({ id, telephone, send, receive, time, date });
+    console.log('Row added to Google Sheet:', { id, telephone, send, receive, time, date });
+  } catch (err) {
+    console.error('Failed to append to Google Sheet:', err.message);
+  }
+}
 
 async function initializeSocket(phoneNumber) {
   const authFolder = path.join(__dirname, 'auth_info_baileys', phoneNumber);
-  
-  // Ensure auth directory exists
-  if (!fs.existsSync(authFolder)) {
-    fs.mkdirSync(authFolder, { recursive: true });
-  }
+  if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
 
-  // Load or create auth state
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
-
-  // Create new socket instance
   const sock = makeWASocket({
     printQRInTerminal: true,
     auth: state,
-    browser: ['AQSA', '', ''],
+    browser: ['BOT', '', '']
   });
 
-//**************************************
-//=====================================
-
-exportedNumbers.set(phoneNumber, new Set());
-
-// From chats history
-sock.ev.on('messaging-history.set', ({ contacts }) => {
-  const current = exportedNumbers.get(phoneNumber);
-  contacts.forEach(contact => {
-    if (contact.id?.endsWith('@s.whatsapp.net')) {
-      current.add(contact.id.replace('@s.whatsapp.net', ''));
-    }
-  });
-  console.log(`[${phoneNumber}] Chat history numbers loaded`);
-});
-
-// From contact sync
-sock.ev.on('contacts.upsert', (contacts) => {
-  const current = exportedNumbers.get(phoneNumber);
-  contacts.forEach(contact => {
-    if (contact.id?.endsWith('@s.whatsapp.net')) {
-      current.add(contact.id.replace('@s.whatsapp.net', ''));
-    }
-  });
-  console.log(`[${phoneNumber}] Contact list numbers loaded`);
-});
-
-
-
-
-//=====================================
-//**************************************
-
-
-  // Store socket instance
   sockets.set(phoneNumber, { sock });
 
-  // Connection event handler
+  sock.ev.on('messages.update', (updates) => {
+    for (const update of updates) {
+      if (update.key && update.update && update.update.status !== undefined) {
+        messageStatusMap.set(update.key.id, update.update.status);
+      }
+    }
+  });
+
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Handle QR code generation
     if (qr) {
       const qrCodeBase64 = await QRCode.toDataURL(qr);
       sockets.set(phoneNumber, { ...sockets.get(phoneNumber), qrCodeBase64 });
     }
 
-    // Handle connection close
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode;
       console.log(`Connection closed for ${phoneNumber}. Reason: ${reason}`);
 
       if (reason === DisconnectReason.loggedOut) {
-        console.log(`🔒 Logged out: cleaning up for ${phoneNumber}`);
-        
-        sockets.delete(phoneNumber); // Prevent duplicate reconnects
-
+        sockets.delete(phoneNumber);
         fs.rm(authFolder, { recursive: true, force: true }, (err) => {
           if (!err) {
-            console.log(`🧹 Auth cleared for ${phoneNumber}, reinitializing...`);
             initializeSocket(phoneNumber);
-          } else {
-            console.error(`Failed to delete auth folder: ${err}`);
           }
         });
       } else {
-        console.log(`Reconnecting ${phoneNumber} in 5 seconds...`);
-        setTimeout(() => initializeSocket(phoneNumber), 5000);
+        setTimeout(() => initializeSocket(phoneNumber), 4000);
       }
     }
 
-    // Handle successful connection
     if (connection === 'open') {
-      console.log(`✅ Connected: ${phoneNumber}`);
-      sockets.set(phoneNumber, { sock, qrCodeBase64: null });
-
-      try {
-        // 🛠 Force sync of chats and contacts
-        const chats = await sock.chatFetchAll();
-        const contacts = await sock.onWhatsApp(phoneNumber);
-
-        console.log(`📥 Synced ${chats.length} chats and ${contacts.length} contacts`);
-      } catch (err) {
-        console.error(`❌ Error syncing chats/contacts:`, err);
-      }
+      console.log(`Connected: ${phoneNumber}`);
     }
   });
 
-  // Credentials update handler
   sock.ev.on('creds.update', saveCreds);
 
-  // Message handler with DB integration
-  sock.ev.on('messages.upsert', async (msgUpdate) => {
-    const messages = msgUpdate.messages;
-    if (!messages?.length) return;
+sock.ev.on('messages.upsert', async (msgUpdate) => {
+  const messages = msgUpdate.messages;
+  if (!messages?.length) return;
 
-    for (const msg of messages) {
+  for (const msg of messages) {
+    if (msg.key.fromMe) continue;
+
+    const text = extractText(msg);
+    if (!text.trim()) continue;
+
+    if (text.length > 500) {
+      await sock.sendMessage(msg.key.remoteJid, { text: "الرسالة طويلة جداً، حاول تبسيط سؤالك لو سمحت 🙏" });
+      return;
+    }
+
+    setTimeout(async () => {
+      if (!isWithinWorkingHours()) return;
+
+      const status = messageStatusMap.get(msg.key.id);
+      if (status === 4) return; // Don't reply if seen
+
+      const userId = extractPhone(msg.key.participant || msg.key.remoteJid);
+      const dateStr = getJerusalemDateStr();
+
+      console.log('Checking for record:', { telephone: userId, date: dateStr });
+      const exists = await recordExists(userId, dateStr);
+
       try {
-        if (msg.key.fromMe) continue;
-        
-        const text = msg.message?.conversation || 
-                     msg.message?.extendedTextMessage?.text || '';
-        const senderNumber = msg.key.remoteJid.replace('@s.whatsapp.net', '');
+        const reply = await getGeminiReply(text);
+        await sock.sendMessage(msg.key.remoteJid, { text: reply });
 
-        // Handle confirmation
-        if (['1', '١'].includes(text.trim())) {
-          await sock.sendMessage(msg.key.remoteJid, { text: "تم قبول طلبك" });
-          
-          const connection = await pool.getConnection();
-          await connection.execute(
-            'DELETE FROM events_2_t WHERE DATE(start) = CURDATE() AND tel = ?',
-            [senderNumber]
-          );
-          connection.release();
-          
-          console.log(`Processed confirmation from ${senderNumber}`);
+        if (!exists) {
+          // فقط أضف السجل لو مش موجود
+          const rowId = Date.now();
+          const time = DateTime.now().setZone('Asia/Jerusalem').toFormat('yyyy-LL-dd HH:mm:ss');
+          await appendToSheet({
+            id: rowId,
+            telephone: userId,
+            send: text,
+            receive: reply,
+            time,
+            date: dateStr
+          });
+          console.log(`Added new record for ${userId} on ${dateStr}`);
+        } else {
+          console.log(`Record already exists for ${userId} on ${dateStr}, reply sent but no new record.`);
         }
       } catch (err) {
-        console.error('Message processing error:', err);
+        console.error('Gemini API error:', err);
+        await sock.sendMessage(msg.key.remoteJid, { text: 'حدث خطأ أثناء معالجة رسالتك 🤖' });
       }
-    }
+    }, 5000);
+  }
+});
+
+}
+
+function extractText(msg) {
+  if (!msg?.message) return '';
+  const m = msg.message;
+  return m.conversation ||
+    m.extendedTextMessage?.text ||
+    m.imageMessage?.caption ||
+    m.videoMessage?.caption ||
+    m.documentMessage?.caption ||
+    '';
+}
+
+async function getGeminiReply(userInput) {
+  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+  const result = await model.generateContent({
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: `${SYSTEM_PROMPT}\n\n${userInput}` }
+        ]
+      }
+    ]
   });
+
+  const response = result.response;
+  return response.text().trim();
 }
 
 function getSocket(phoneNumber) {
   return sockets.get(phoneNumber);
 }
 
-//module.exports = { initializeSocket, getSocket };
 module.exports = { initializeSocket, getSocket, exportedNumbers };
-
